@@ -1,0 +1,19 @@
+﻿
+//====页面动态加载C-Lodop云打印必须的文件CLodopfuncs.js====
+
+var head = document.head || document.getElementsByTagName("head")[0] || document.documentElement;
+
+//让其它电脑的浏览器通过本机打印（仅适用C-Lodop自带的例子）：
+var oscript = document.createElement("script");
+// oscript.src ="/CLodopfuncs.js";
+head.insertBefore( oscript,head.firstChild );
+
+//让本机的浏览器打印(更优先一点)：
+oscript = document.createElement("script");
+oscript.src ="http://127.0.0.1:8000/CLodopfuncs.js?priority=2";
+head.insertBefore(oscript,head.firstChild );
+
+//加载双端口(8000和18000）避免其中某个端口被占用：
+oscript = document.createElement("script");
+oscript.src ="http://127.0.0.1:18000/CLodopfuncs.js?priority=1";
+head.insertBefore( oscript,head.firstChild );
