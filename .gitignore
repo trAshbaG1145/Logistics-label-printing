@@ -1,9 +1,11 @@
-# 忽略依赖包文件夹
+# 忽略所有层级的依赖包
 node_modules/
 
-# 忽略系统生成的日志
+# 忽略所有层级的日志
 *.log
 npm-debug.log*
 
-# ⚠️ 极其重要：忽略环境变量文件 (保护 API Key)
+# 忽略所有层级的环境变量文件 (保护 Key)
 .env
+.DS_Store
+dist/
