@@ -1,0 +1,9 @@
+# 忽略依赖包文件夹
+node_modules/
+
+# 忽略系统生成的日志
+*.log
+npm-debug.log*
+
+# ⚠️ 极其重要：忽略环境变量文件 (保护 API Key)
+.env
