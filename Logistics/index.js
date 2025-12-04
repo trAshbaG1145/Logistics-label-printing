@@ -6,6 +6,7 @@ import cors from 'cors';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import fs from 'fs'; // [新增] 引入文件系统模块
+import { sendOrder as sendToPrinter } from './services/printerAdapters/index.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -34,22 +35,57 @@ const saveOrders = () => {
 };
 
 // --- 配置阿里云百炼 ---
-const client = new OpenAI({
-    apiKey: process.env.BAILIAN_API_KEY,
-    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-});
+let client = null;
+if (process.env.BAILIAN_API_KEY) {
+    client = new OpenAI({
+        apiKey: process.env.BAILIAN_API_KEY,
+        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    });
+} else {
+    console.warn('警告: BAILIAN_API_KEY 未设置，AI 功能将被禁用。测试/本地运行时可留空。');
+}
 
 app.use(cors());
 app.use(bodyParser.text({ type: '*/xml' }));
 app.use(express.json());
 
+// 下载图片并返回 base64 编码的 data URL（尽可能兼容 http/https）
+import http from 'http';
+import https from 'https';
+
+async function downloadImageAsBase64(url) {
+    return new Promise((resolve, reject) => {
+        try {
+            const client = url.startsWith('https') ? https : http;
+            client.get(url, (res) => {
+                const chunks = [];
+                res.on('data', (chunk) => chunks.push(chunk));
+                res.on('end', () => {
+                    const buffer = Buffer.concat(chunks);
+                    const contentType = res.headers['content-type'] || 'image/jpeg';
+                    const base64 = buffer.toString('base64');
+                    resolve(`data:${contentType};base64,${base64}`);
+                });
+            }).on('error', (err) => {
+                reject(err);
+            });
+        } catch (err) {
+            reject(err);
+        }
+    });
+}
+
 // 1. 微信验证接口
 app.get('/wechat', (req, res) => {
     console.log('收到微信验证请求:', req.query);
     const { signature, timestamp, nonce, echostr } = req.query;
-    const token = 'mytesttoken'; // 必须与微信后台一致
+    const token = process.env.WECHAT_TOKEN || 'mytesttoken'; // 从环境读取，兼容旧配置（推荐在 .env 中定义 WECHAT_TOKEN）
     const str = [token, timestamp, nonce].sort().join('');
     const sha = sha1(str);
+
+    if (!process.env.WECHAT_TOKEN) {
+        console.warn('警告: WECHAT_TOKEN 未设置，正在使用默认硬编码 token（不建议用于生产）');
+    }
 
     if (sha === signature) {
         console.log('验证通过');
@@ -98,8 +134,23 @@ app.post('/api/clear', (req, res) => {
     res.json({ success: true });
 });
 
+// --- LT 平台回调接收接口（由灵通平台回调） ---
+import { handleLtCallback } from './services/ltCallbackHandler.js';
+
+app.post('/api/lt/callback', (req, res) => {
+    try {
+        const payload = req.body;
+        const updatedIds = handleLtCallback(payload, orders);
+        if (updatedIds && updatedIds.length > 0) saveOrders();
+        res.json({ code: 0, msg: '成功' });
+    } catch (err) {
+        console.error('LT callback handling failed:', err);
+        res.json({ code: 1, msg: String(err) });
+    }
+});
+
 // --- 核心智能解析逻辑 (已升级支持多模态) ---
-async function processContent(input, type = 'text') {
+export async function processContent(input, type = 'text') {
     try {
         let modelName = "qwen-plus"; // 默认文本模型
         let userMessageContent = input;
@@ -107,10 +158,22 @@ async function processContent(input, type = 'text') {
         // 如果是图片，构造多模态请求并切换模型
         if (type === 'image') {
             modelName = "qwen-vl-max"; // [新增] 使用视觉模型
-            userMessageContent = [
-                { type: "text", text: "请提取这张图片里的物流收件人信息。" },
-                { type: "image_url", image_url: { url: input } }
-            ];
+
+            // 尝试下载图片并发送为 data URL，避免直接依赖微信短期 PicUrl
+            try {
+                const dataUrl = await downloadImageAsBase64(input);
+                userMessageContent = [
+                    { type: "text", text: "请提取这张图片里的物流收件人信息。" },
+                    // 模型端如果支持 data URL，会更稳定；同时保留原始 URL 作为回退
+                    { type: "image_url", image_url: { url: dataUrl } }
+                ];
+            } catch (err) {
+                console.warn('图片下载失败，回退为使用原始 URL：', err.message || err);
+                userMessageContent = [
+                    { type: "text", text: "请提取这张图片里的物流收件人信息。" },
+                    { type: "image_url", image_url: { url: input } }
+                ];
+            }
         }
 
         const completion = await client.chat.completions.create({
@@ -132,25 +195,76 @@ async function processContent(input, type = 'text') {
             temperature: 0.1,
         });
 
-        // 数据清洗
-        let content = completion.choices[0].message.content;
-        content = content.replace(/```json/g, '').replace(/```/g, '').trim();
+        // 数据清洗 & 解析 (更鲁棒的 JSON 处理 —— 包含尝试从原始响应抽取 JSON、并在解析失败时请模型纠正)
+        const rawContent = completion.choices[0].message.content;
+        // 记录原始 AI 响应以便审计
+        try {
+            const logDir = path.join(__dirname, 'logs');
+            if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
+            fs.appendFileSync(path.join(logDir, 'raw_ai_responses.log'), `\n=== ${new Date().toISOString()} | model=${modelName} ===\n${rawContent}\n`);
+        } catch (err) {
+            console.warn('无法写入 raw_ai_responses.log:', err.message || err);
+        }
 
-        // 解析 JSON
-        let data = JSON.parse(content);
+        // 先去除常见 Markdown 包裹
+        let content = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
+
+        async function tryParseAndFix(text) {
+            try {
+                const parsed = JSON.parse(text);
+                return parsed;
+            } catch (_) {
+                // 尝试从文本中抽取第一个 {..} 或 [..] 快速尝试解析
+                const m = text.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
+                if (m) {
+                    try {
+                        return JSON.parse(m[0]);
+                    } catch (__) {
+                        // 继续下一步
+                    }
+                }
+
+                // 最后一步：请求模型只返回纯 JSON（纠错请求）
+                try {
+                    const fixPrompt = `原始内容:\n${text}\n\n请仅返回严格的 JSON —— 一个数组或空数组，格式与示例一致：[{"name":"张三","phone":"13800000000","province":"省","city":"市","district":"区","detail":"详细地址"}]`;
+                    const fixResp = await client.chat.completions.create({
+                        model: modelName,
+                        messages: [
+                            { role: 'system', content: '你负责将给出的文本解析为纯 JSON 输出：只返回 JSON，不要额外解释。' },
+                            { role: 'user', content: fixPrompt }
+                        ],
+                        temperature: 0.0
+                    });
+                    const fixed = fixResp.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+                    // 记录修正后的响应
+                    try {
+                        fs.appendFileSync(path.join(__dirname, 'logs', 'raw_ai_responses.log'), `\n---纠错回应 ${new Date().toISOString()} ---\n${fixed}\n`);
+                    } catch (err) { /* ignore */ }
+                    return JSON.parse(fixed);
+                } catch (err) {
+                    throw new Error('无法从模型输出解析出有效 JSON: ' + (err.message || String(err)));
+                }
+            }
+        }
+
+        const dataParsed = await tryParseAndFix(content);
+        let data = dataParsed;
         if (!Array.isArray(data)) data = [data];
 
         // 存入数据库
         let newCount = 0;
+        const addedOrders = [];
         data.forEach(item => {
             if (item.name || item.phone || item.detail) {
-                orders.unshift({
+                const orderObj = {
                     id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
                     ...item,
                     fullAddress: `${item.province || ''}${item.city || ''}${item.district || ''}${item.detail || ''}`,
                     source: type === 'image' ? '微信-截图' : '微信-文本',
                     createTime: new Date().toLocaleString()
-                });
+                };
+                orders.unshift(orderObj);
+                addedOrders.push(orderObj);
                 newCount++;
             }
         });
@@ -158,6 +272,31 @@ async function processContent(input, type = 'text') {
         if (newCount > 0) {
             saveOrders(); // [新增] 保存到本地文件
             console.log(`解析成功，新增 ${newCount} 条。`);
+
+            // 尝试把新增订单提交给打印平台适配器（如果配置了）
+            for (const newOrder of addedOrders) {
+                try {
+                    const printResult = await sendToPrinter(newOrder);
+                    if (printResult && printResult.success) {
+                        newOrder.printed = true;
+                        newOrder.printResponse = printResult.response || null;
+                        console.log(`订单 ${newOrder.id} 已提交打印平台，返回:`, printResult.response);
+                    } else if (printResult && printResult.skipped) {
+                        console.log(`订单 ${newOrder.id} 打单适配器跳过（未配置）`);
+                    } else {
+                        newOrder.printed = false;
+                        newOrder.printError = printResult && (printResult.error || printResult.response) || 'unknown';
+                        console.warn(`订单 ${newOrder.id} 打单失败:`, newOrder.printError);
+                    }
+                } catch (err) {
+                    newOrder.printed = false;
+                    newOrder.printError = err.message || String(err);
+                    console.error(`提交订单 ${newOrder.id} 到打印平台发生异常:`, err);
+                }
+            }
+
+            // 保存 print 状态回 orders.json
+            saveOrders();
         } else {
             console.log("AI 未识别到有效地址信息。");
         }
@@ -167,7 +306,21 @@ async function processContent(input, type = 'text') {
     }
 }
 
-app.listen(PORT, () => {
-    console.log(`后端服务已启动: http://localhost:${PORT}`);
-    console.log(`数据存储路径: ${DATA_FILE}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+    app.listen(PORT, () => {
+        console.log(`后端服务已启动: http://localhost:${PORT}`);
+        console.log(`数据存储路径: ${DATA_FILE}`);
+    });
+}
+
+// 从 AI 原始回应中尝试抽取或清洗出 JSON 文本（不做模型纠错）
+export function tryExtractJsonString(rawContent) {
+    if (!rawContent || typeof rawContent !== 'string') return null;
+    let content = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
+    // 优先尝试完整内容
+    try { JSON.parse(content); return content; } catch (_) {}
+    // 提取第一个对象/数组片段
+    const m = content.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
+    if (m) return m[0];
+    return null;
+}

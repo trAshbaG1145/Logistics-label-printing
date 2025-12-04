@@ -5,7 +5,8 @@
     "main": "index.js",
     "type": "module",
     "scripts": {
-        "start": "node index.js"
+        "start": "node index.js",
+        "test": "NODE_ENV=test node test/test_parse_extract.js && NODE_ENV=test node test/test_lt_adapter.js && NODE_ENV=test node test/test_lt_callback.js"
     },
     "dependencies": {
         "body-parser": "^1.20.3",
