@@ -58,6 +58,20 @@ async function run() {
         };
 
         const tradeResp = await sendOrder(order, { shopName, userKey });
+        // persist created shop credentials to a local gitignored file for audit
+        try {
+            const fs = await import('fs');
+            const storagePath = path.join(__dirname, '..', 'lt_created_users.json');
+            let arr = [];
+            if (fs.existsSync(storagePath)) {
+                try { arr = JSON.parse(fs.readFileSync(storagePath, 'utf8') || '[]'); } catch (_) { arr = []; }
+            }
+            arr.push({ shopName, password, userKey, createAt: new Date().toISOString() });
+            fs.writeFileSync(storagePath, JSON.stringify(arr, null, 2), 'utf8');
+            console.log('Saved created shop info to', storagePath);
+        } catch (e) {
+            console.warn('Failed to persist created user info:', e.message || e);
+        }
         console.log('createTrade response summary:', tradeResp && tradeResp.success ? 'SUCCESS' : tradeResp);
         process.exitCode = tradeResp && tradeResp.success ? 0 : 2;
     } catch (err) {

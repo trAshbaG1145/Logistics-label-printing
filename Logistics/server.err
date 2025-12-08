@@ -1,0 +1,7 @@
+微信 API 非 JSON 响应 headers: { connection: 'close', 'content-length': '0' }
+微信 API 响应非 JSON (status 412): 
+创建自定义菜单失败: Error: 微信 API 响应非 JSON (status 412): 
+    at IncomingMessage.<anonymous> (file:///E:/Logistics-label-printing/Logistics/index.js:158:32)
+    at IncomingMessage.emit (node:events:520:35)
+    at endReadableNT (node:internal/streams/readable:1701:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21)

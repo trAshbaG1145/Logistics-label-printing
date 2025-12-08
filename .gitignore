@@ -11,3 +11,5 @@ npm-debug.log*
 dist/
 
 orders.json
+Logistics/lt_created_users.json
+Logistics/wechat_users.json

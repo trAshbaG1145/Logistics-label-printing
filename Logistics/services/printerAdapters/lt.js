@@ -8,9 +8,22 @@ import { createHash } from 'crypto';
 
 const BASE_URL = process.env.LT_BASE_URL || 'https://ltopen.800best.com/api/v1';
 
-function md5(str) {
-    return createHash('md5').update(String(str)).digest('hex');
+// --- helpers --------------------------------------------------------------
+const md5 = (str) => createHash('md5').update(String(str)).digest('hex');
+
+// 统一获取应用级配置，避免各函数重复读取/校验
+function getAppConfig() {
+    const appId = process.env.LT_APP_ID;
+    const appKey = process.env.LT_APP_KEY || process.env.LT_TOKEN;
+    const base = process.env.LT_BASE_URL || BASE_URL;
+    if (!appId || !appKey) {
+        throw new Error('LT app credentials missing (LT_APP_ID + LT_APP_KEY/LT_TOKEN)');
+    }
+    return { appId, appKey, base: base.endsWith('/') ? base.slice(0, -1) : base };
 }
+
+const signApp = (appId, appKey, timestamp, dataStr) => md5(appId + timestamp + appKey + dataStr);
+const signUser = (shopName, timestamp, userKey) => md5(shopName + timestamp + userKey);
 
 // post as application/x-www-form-urlencoded
 function postForm(fullUrl, params = {}) {
@@ -46,29 +59,47 @@ function postForm(fullUrl, params = {}) {
 }
 
 export async function createUser(userPayload) {
-    const appId = process.env.LT_APP_ID;
-    const appKey = process.env.LT_APP_KEY || process.env.LT_TOKEN;
-    const base = process.env.LT_BASE_URL || BASE_URL;
-
-    if (!appId || !appKey) {
-        throw new Error('LT app credentials missing (LT_APP_ID/LT_APP_KEY or LT_TOKEN)');
-    }
-
+    const { appId, appKey, base } = getAppConfig();
     const timestamp = String(Date.now());
     const dataStr = JSON.stringify(userPayload || {});
-    const appSign = md5(appId + timestamp + appKey + dataStr);
-    const endpoint = (base.endsWith('/') ? base.slice(0, -1) : base) + '/users/create';
+    const appSign = signApp(appId, appKey, timestamp, dataStr);
+    const endpoint = `${base}/users/create`;
+    const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
+    return res.body || res;
+}
 
+export async function getUserInfo(shopName) {
+    const { appId, appKey, base } = getAppConfig();
+    const timestamp = String(Date.now());
+    const dataStr = JSON.stringify({ shopName });
+    const appSign = signApp(appId, appKey, timestamp, dataStr);
+    const endpoint = `${base}/users/get`;
+    const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
+    return res.body || res;
+}
+
+export async function getLoginUrl(shopName, userKey) {
+    const { appId, appKey, base } = getAppConfig();
+    if (!shopName || !userKey) throw new Error('shopName/userKey required');
+    const timestamp = String(Date.now());
+    const userSign = signUser(shopName, timestamp, userKey);
+    const dataStr = JSON.stringify({ user: { shopName, timestamp, userSign } });
+    const appSign = signApp(appId, appKey, timestamp, dataStr);
+    const endpoint = `${base}/users/login/url`;
     const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
     return res.body || res;
 }
 
 export async function sendOrder(order, opts = {}) {
     // Prefer platform-level credentials if available; trades API will use shopName + userKey nested in data
-    const appId = process.env.LT_APP_ID;
-    // Support both LT_APP_KEY and older LT_TOKEN variable names
-    const appKey = process.env.LT_APP_KEY || process.env.LT_TOKEN;
-    const base = process.env.LT_BASE_URL || BASE_URL; // allow override
+    let appId, appKey, base;
+    try {
+        ({ appId, appKey, base } = getAppConfig());
+    } catch (err) {
+        // 保持兼容：未配置时直接跳过，不抛出
+        console.log('灵通适配器未配置 LT_APP_ID / LT_APP_KEY，跳过提交。');
+        return { skipped: true, reason: err.message };
+    }
 
     const shopName = opts.shopName || process.env.LT_SHOP_NAME;
     const userKey = opts.userKey || process.env.LT_USER_KEY;
@@ -127,10 +158,10 @@ export async function sendOrder(order, opts = {}) {
     const dataStr = JSON.stringify(dataObj);
 
     // top-level signature: md5(appId + timestamp + appKey + data)
-    const appSign = md5(appId + timestamp + appKey + dataStr);
+    const appSign = signApp(appId, appKey, timestamp, dataStr);
 
     // POST to /trades/create
-    const endpoint = (base.endsWith('/') ? base.slice(0, -1) : base) + '/trades/create';
+    const endpoint = `${base}/trades/create`;
 
     try {
         const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
@@ -143,4 +174,38 @@ export async function sendOrder(order, opts = {}) {
     } catch (err) {
         return { skipped: false, success: false, error: err.message || String(err) };
     }
+}
+
+// === OAuth 登录流程相关函数 [新增] ===
+export function generateLoginUrl(state, callbackUrl) {
+    const appId = process.env.LT_APP_ID;
+    if (!appId) throw new Error('LT_APP_ID not configured');
+    // 可通过环境变量覆盖登录入口（测试环境常用 http://lttest.800best.com/smart/h5/index.html）
+    const loginBaseUrl = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+    const params = new URLSearchParams({ appId, state, callbackUrl });
+    return { loginUrl: `${loginBaseUrl}?${params.toString()}`, state };
+}
+
+export async function exchangeAuthCode(authCode) {
+    const { appId, appKey, base } = getAppConfig();
+    if (!authCode) throw new Error('authCode is required');
+    const timestamp = String(Date.now());
+    const dataStr = JSON.stringify({ authCode });
+    const appSign = signApp(appId, appKey, timestamp, dataStr);
+    const endpoint = `${base}/users/auth/exchangeCode`;
+    try {
+        const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
+        const body = res.body || {};
+        if (body && typeof body === 'object' && body.code === 0) {
+            return { success: true, data: body.data || {} };
+        } else {
+            return { success: false, error: body.msg || '获取凭证失败' };
+        }
+    } catch (err) {
+        return { success: false, error: err.message || String(err) };
+    }
+}
+
+export function validateState(state, expectedState) {
+    return state === expectedState;
 }
