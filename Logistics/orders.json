@@ -1,0 +1,159 @@
+[
+  {
+    "id": "1765450710771ped4q",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:58:30",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": true,
+    "printResponse": {
+      "code": 0,
+      "msg": "成功",
+      "data": 1
+    }
+  },
+  {
+    "id": "1765450665041v3ciq",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:57:45",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": "shopName and userKey required for trades.create"
+  },
+  {
+    "id": "1765450270685nhniy",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:51:10",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": {
+      "code": 200002,
+      "msg": "用户认证信息错误或者用户不存在"
+    }
+  },
+  {
+    "id": "176545006504243c7a",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:47:45",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": {
+      "code": 200002,
+      "msg": "用户认证信息错误或者用户不存在"
+    }
+  },
+  {
+    "id": "1765449945780kdm63",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:45:45",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": {
+      "code": 200002,
+      "msg": "用户认证信息错误或者用户不存在"
+    }
+  },
+  {
+    "id": "1765449716402wjfgc",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:41:56",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": {
+      "code": 200002,
+      "msg": "用户认证信息错误或者用户不存在"
+    }
+  },
+  {
+    "id": "1765449606871tc11s",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:40:06",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": "用户未绑定打单店铺"
+  },
+  {
+    "id": "1765448894339vkbnp",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:28:14",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": {
+      "code": 200002,
+      "msg": "用户认证信息错误或者用户不存在"
+    }
+  },
+  {
+    "id": "17654488359204250b",
+    "name": "纯净水",
+    "phone": "15671061038",
+    "province": "湖北省",
+    "city": "武汉市",
+    "district": "洪山区",
+    "detail": "狮子山街1号华中农业大学荟园菜鸟驿站",
+    "fullAddress": "湖北省武汉市洪山区狮子山街1号华中农业大学荟园菜鸟驿站",
+    "source": "微信-文本",
+    "createTime": "2025/12/11 18:27:15",
+    "wechatUser": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "printed": false,
+    "printError": {
+      "code": 200002,
+      "msg": "用户认证信息错误或者用户不存在"
+    }
+  }
+]

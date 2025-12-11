@@ -79,8 +79,9 @@ export async function getUserInfo(shopName) {
 }
 
 export async function getLoginUrl(shopName, userKey) {
+    // 按官方文档：userSign=md5(shopName + timestamp + userKey)，shopName 必填
     const { appId, appKey, base } = getAppConfig();
-    if (!shopName || !userKey) throw new Error('shopName/userKey required');
+    if (!shopName || !userKey) throw new Error('shopName and userKey required');
     const timestamp = String(Date.now());
     const userSign = signUser(shopName, timestamp, userKey);
     const dataStr = JSON.stringify({ user: { shopName, timestamp, userSign } });
@@ -101,12 +102,17 @@ export async function sendOrder(order, opts = {}) {
         return { skipped: true, reason: err.message };
     }
 
+    // 认证名称：按官方文档使用 shopName
     const shopName = opts.shopName || process.env.LT_SHOP_NAME;
     const userKey = opts.userKey || process.env.LT_USER_KEY;
 
     if (!appId || !appKey) {
         console.log('灵通适配器未配置 LT_APP_ID / LT_APP_KEY，跳过提交。');
         return { skipped: true };
+    }
+
+    if (!shopName || !userKey) {
+        return { skipped: false, success: false, error: 'shopName and userKey required for trades.create' };
     }
 
     // Construct trade object according to docs (trades.create)
@@ -141,31 +147,13 @@ export async function sendOrder(order, opts = {}) {
     };
 
     // Build data object
-    const dataObj = {
-        user: {}
-    };
-
-    if (shopName && userKey) {
-        const userSign = md5(shopName + timestamp + userKey);
-        dataObj.user = { shopName, timestamp, userSign };
-    } else {
-        // leave user empty if not configured — some APIs may allow platform appId auth only
-        dataObj.user = { timestamp: timestamp };
-    }
-
-    dataObj.trades = [trade];
-
-    const dataStr = JSON.stringify(dataObj);
-
-    // top-level signature: md5(appId + timestamp + appKey + data)
-    const appSign = signApp(appId, appKey, timestamp, dataStr);
-
-    // POST to /trades/create
-    const endpoint = `${base}/trades/create`;
-
     try {
+        const userObj = { shopName, timestamp, userSign: md5(shopName + timestamp + userKey) };
+        const dataObj = { user: userObj, trades: [trade] };
+        const dataStr = JSON.stringify(dataObj);
+        const appSign = signApp(appId, appKey, timestamp, dataStr);
+        const endpoint = `${base}/trades/create`;
         const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
-        // Expected response: { code:0, msg:'成功', data: ... }
         const body = res.body || {};
         if (body && typeof body === 'object' && body.code === 0) {
             return { skipped: false, success: true, response: body };
@@ -176,36 +164,3 @@ export async function sendOrder(order, opts = {}) {
     }
 }
 
-// === OAuth 登录流程相关函数 [新增] ===
-export function generateLoginUrl(state, callbackUrl) {
-    const appId = process.env.LT_APP_ID;
-    if (!appId) throw new Error('LT_APP_ID not configured');
-    // 可通过环境变量覆盖登录入口（测试环境常用 http://lttest.800best.com/smart/h5/index.html）
-    const loginBaseUrl = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
-    const params = new URLSearchParams({ appId, state, callbackUrl });
-    return { loginUrl: `${loginBaseUrl}?${params.toString()}`, state };
-}
-
-export async function exchangeAuthCode(authCode) {
-    const { appId, appKey, base } = getAppConfig();
-    if (!authCode) throw new Error('authCode is required');
-    const timestamp = String(Date.now());
-    const dataStr = JSON.stringify({ authCode });
-    const appSign = signApp(appId, appKey, timestamp, dataStr);
-    const endpoint = `${base}/users/auth/exchangeCode`;
-    try {
-        const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
-        const body = res.body || {};
-        if (body && typeof body === 'object' && body.code === 0) {
-            return { success: true, data: body.data || {} };
-        } else {
-            return { success: false, error: body.msg || '获取凭证失败' };
-        }
-    } catch (err) {
-        return { success: false, error: err.message || String(err) };
-    }
-}
-
-export function validateState(state, expectedState) {
-    return state === expectedState;
-}
