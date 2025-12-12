@@ -1,0 +1,36 @@
+[
+  {
+    "shopName": "auto_test_1764855533596",
+    "password": "A1b2C3d4!",
+    "userKey": "ae08d4f008b7422abef5abdd9d8df116",
+    "createAt": "2025-12-04T13:38:53.996Z",
+    "loginName": "321_auto_test_1764855533596",
+    "loginUrl": "https://lt.800best.com/smart/h5/index-v4.15.0.html?uid=12991886&token=7a5LZgVwJwfikT8&server=https://ltserver.800best.com",
+    "updatedAt": "2025-12-08T11:07:11.386Z"
+  },
+  {
+    "shopName": "wx_user_o2XiA2Kk_6416",
+    "loginName": "321_wx_user_o2XiA2Kk_6416",
+    "password": "hwm8Tpr#",
+    "userKey": "c0a88b1cba59430581fcd374a642855e",
+    "loginUrl": "https://lt.800best.com/smart/h5/index.html?shopName=wx_user_o2XiA2Kk_6416",
+    "openid": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "createdAt": "2025-12-11T10:41:56.583Z"
+  },
+  {
+    "shopName": "wx_user_o2XiA2ON_7110",
+    "loginName": "321_wx_user_o2XiA2ON_7110",
+    "userKey": "d9650671ebc74a99879c90da5bb1a644",
+    "openid": "o2XiA2ONi8NKIe_JOMxOypffnznc",
+    "createdAt": "2025-12-11T15:14:07.293Z",
+    "lastSender": {
+      "name": "芳芳",
+      "phone": "13908609136",
+      "province": "",
+      "city": "",
+      "district": "",
+      "detail": "发件人芳芳",
+      "role": "sender"
+    }
+  }
+]

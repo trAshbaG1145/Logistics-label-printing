@@ -8,8 +8,3 @@ npm-debug.log*
 # 忽略所有层级的环境变量文件 (保护 Key)
 .env
 .DS_Store
-dist/
-
-orders.json
-Logistics/lt_created_users.json
-Logistics/wechat_users.json

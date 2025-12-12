@@ -1,0 +1,46 @@
+[
+  {
+    "openid": "o2XiA2ONi8NKIe_JOMxOypffnznc",
+    "nickname": "user_o2XiA2ON",
+    "bindTime": "2025-12-11T10:27:14.023Z",
+    "ltBindings": [
+      {
+        "shopName": "wx_user_o2XiA2Kk_6416",
+        "loginName": "321_wx_user_o2XiA2Kk_6416",
+        "userKey": "c0a88b1cba59430581fcd374a642855e",
+        "bindAt": "2025-12-11T10:41:56.582Z",
+        "lastSender": {
+          "name": "芳芳",
+          "phone": "13908609136",
+          "province": "",
+          "city": "",
+          "district": "",
+          "detail": "",
+          "role": "sender"
+        }
+      }
+    ]
+  },
+  {
+    "openid": "o2XiA2Kkddmtvdfx40s-egY33AwI",
+    "nickname": "user_o2XiA2Kk",
+    "bindTime": "2025-12-11T15:12:04.348Z",
+    "ltBindings": [
+      {
+        "shopName": "wx_user_o2XiA2ON_7110",
+        "userKey": "d9650671ebc74a99879c90da5bb1a644",
+        "loginName": "321_wx_user_o2XiA2ON_7110",
+        "lastSender": {
+          "name": "余红",
+          "phone": "13277239093",
+          "province": "",
+          "city": "",
+          "district": "",
+          "detail": "发件人",
+          "role": "sender"
+        },
+        "bindAt": "2025-12-11T15:14:07.292Z"
+      }
+    ]
+  }
+]
