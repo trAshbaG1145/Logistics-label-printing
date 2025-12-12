@@ -7,7 +7,7 @@ import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import fs from 'fs'; // [新增] 引入文件系统模块
 import { sendOrder as sendToPrinter } from './services/printerAdapters/index.js';
-import { createUser, getLoginUrl } from './services/printerAdapters/lt.js';
+import { createUser, getLoginUrl, getUserInfo, updateUser } from './services/printerAdapters/lt.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -67,20 +67,22 @@ const getOrCreateWechatUser = (openid, nickname = '') => {
     }
     return user;
 };
-// 为微信用户绑定 LT 打单账户（支持登录名，保留原 shopName）
-const bindLtAccount = (openid, shopName, userKey, loginName = null) => {
+// 为微信用户绑定 LT 打单账户（支持登录名，保留原 shopName），可记录 lastSender
+const bindLtAccount = (openid, shopName, userKey, loginName = null, lastSender = null) => {
     const user = getOrCreateWechatUser(openid);
     // 避免重复绑定
     const existBinding = user.ltBindings.find(b => b.shopName === shopName || (loginName && b.loginName === loginName));
     if (existBinding) {
         existBinding.userKey = userKey;
         if (loginName) existBinding.loginName = loginName;
+        if (lastSender) existBinding.lastSender = lastSender;
         existBinding.bindAt = new Date().toISOString();
     } else {
         user.ltBindings.push({
             shopName,
             userKey,
             ...(loginName ? { loginName } : {}),
+            ...(lastSender ? { lastSender } : {}),
             bindAt: new Date().toISOString()
         });
     }
@@ -104,7 +106,12 @@ async function wxRequest(method, url, body = null) {
                 'User-Agent': 'wechat-logistics/1.0',
                 'Connection': 'close'
             };
-            if (body) headers['Content-Type'] = 'application/json';
+            let bodyStr = null;
+            if (body) {
+                bodyStr = JSON.stringify(body);
+                headers['Content-Type'] = 'application/json';
+                headers['Content-Length'] = Buffer.byteLength(bodyStr);
+            }
 
             const options = {
                 method,
@@ -135,7 +142,7 @@ async function wxRequest(method, url, body = null) {
             });
 
             req.on('error', reject);
-            if (body) req.write(JSON.stringify(body));
+            if (bodyStr) req.write(bodyStr);
             req.end();
         } catch (err) {
             reject(err);
@@ -158,6 +165,22 @@ async function getWechatAccessToken() {
     const expires = resp.expires_in ? (resp.expires_in - 120) * 1000 : 7000 * 1000; // 提前 120s 过期
     wechatTokenCache = { token: resp.access_token, expiresAt: Date.now() + expires };
     return resp.access_token;
+}
+
+// 发送客服文本消息，便于下发登录链接等提醒
+async function sendWechatCustomMessage(openid, content) {
+    const token = await getWechatAccessToken();
+    const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`;
+    const payload = {
+        touser: openid,
+        msgtype: 'text',
+        text: { content }
+    };
+    const resp = await wxRequest('POST', url, payload);
+    if (resp && resp.errcode && resp.errcode !== 0) {
+        throw new Error(`发送客服消息失败: ${resp.errmsg || resp.errcode}`);
+    }
+    return resp;
 }
 
 // --- 配置阿里云百炼 ---
@@ -239,10 +262,65 @@ app.post('/wechat', async (req, res) => {
 
         if (message.MsgType === 'text') {
             // 处理文本消息
+            const content = (message.Content || '').trim();
+
+            // 快捷指令：生成打印平台登录链接
+            if (content === '打印' || content === '打单' || content.toLowerCase() === 'print') {
+                try {
+                    if (!wechatUser.ltBindings || wechatUser.ltBindings.length === 0) {
+                        await sendWechatCustomMessage(wechatUser.openid, '❌ 您还未绑定打单账号，请先发送发件人地址完成自动创建/绑定后再试');
+                        return;
+                    }
+
+                    const binding = wechatUser.ltBindings[0];
+                    const loginResp = await getLoginUrl(binding.shopName, binding.userKey);
+                    let loginUrl = null;
+                    if (loginResp && loginResp.code === 0 && loginResp.data) {
+                        loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                    }
+                    if (!loginUrl) {
+                        const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                        const params = new URLSearchParams({ shopName: binding.shopName });
+                        loginUrl = `${base}?${params.toString()}`;
+                    }
+
+                    const accountLabel = binding.loginName || binding.shopName;
+                    const reply = `✅ 登录链接已生成\n店铺：${accountLabel}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>\n(链接有效期较短，请尽快点击)`;
+                    await sendWechatCustomMessage(wechatUser.openid, reply);
+                } catch (err) {
+                    console.error('发送打印登录链接失败:', err);
+                    await sendWechatCustomMessage(wechatUser.openid, '❌ 获取登录链接失败，请稍后再试');
+                }
+                return; // 不走 AI 解析
+            }
+
             processContent(message.Content, 'text', wechatUser);
         } else if (message.MsgType === 'image') {
             // [新增] 处理图片消息
             console.log('收到图片，URL:', message.PicUrl);
+            try {
+                // 图片同样支持快捷“打印”入口：先回复登录链接，随后再走 AI 解析
+                if (!wechatUser.ltBindings || wechatUser.ltBindings.length === 0) {
+                    await sendWechatCustomMessage(wechatUser.openid, '✅ 收到图片，正在解析地址…\n提示：发送发件人地址后会自动为您创建并绑定打单账号');
+                } else {
+                    const binding = wechatUser.ltBindings[0];
+                    const loginResp = await getLoginUrl(binding.shopName, binding.userKey);
+                    let loginUrl = null;
+                    if (loginResp && loginResp.code === 0 && loginResp.data) {
+                        loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                    }
+                    if (!loginUrl) {
+                        const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                        const params = new URLSearchParams({ shopName: binding.shopName });
+                        loginUrl = `${base}?${params.toString()}`;
+                    }
+                    const accountLabel = binding.loginName || binding.shopName;
+                    await sendWechatCustomMessage(wechatUser.openid, `✅ 登录链接已生成\n店铺：${accountLabel}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>\n(链接有效期较短，请尽快点击)`);
+                }
+            } catch (err) {
+                console.error('图片消息提示失败:', err);
+            }
+
             processContent(message.PicUrl, 'image', wechatUser);
         }
     } catch (error) {
@@ -261,6 +339,89 @@ app.post('/api/clear', (req, res) => {
     orders = [];
     saveOrders(); // [新增] 同步清空本地文件
     res.json({ success: true });
+});
+
+// --- 微信用户绑定管理接口 ---
+// 查询用户的所有绑定账户
+app.get('/api/wechat/bindings/:openid', (req, res) => {
+    try {
+        const { openid } = req.params;
+        const user = wechatUsers.find(u => u.openid === openid);
+        if (!user) {
+            return res.json({ code: 1, msg: '用户不存在', data: null });
+        }
+        res.json({ 
+            code: 0, 
+            msg: '成功', 
+            data: {
+                openid: user.openid,
+                nickname: user.nickname,
+                bindings: user.ltBindings || []
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ code: 1, msg: err.message || String(err) });
+    }
+});
+
+// 为用户添加新的打单账户绑定
+app.post('/api/wechat/bindings/:openid', (req, res) => {
+    try {
+        const { openid } = req.params;
+        const { shopName, userKey, loginName } = req.body;
+        if (!shopName || !userKey) {
+            return res.json({ code: 1, msg: 'shopName 和 userKey 必填' });
+        }
+        bindLtAccount(openid, shopName, userKey, loginName);
+        res.json({ code: 0, msg: '绑定成功' });
+    } catch (err) {
+        res.status(500).json({ code: 1, msg: err.message || String(err) });
+    }
+});
+
+// 删除用户的某个绑定
+app.delete('/api/wechat/bindings/:openid/:shopName', (req, res) => {
+    try {
+        const { openid, shopName } = req.params;
+        const user = wechatUsers.find(u => u.openid === openid);
+        if (!user) {
+            return res.json({ code: 1, msg: '用户不存在' });
+        }
+        const idx = user.ltBindings.findIndex(b => b.shopName === shopName);
+        if (idx === -1) {
+            return res.json({ code: 1, msg: '绑定不存在' });
+        }
+        user.ltBindings.splice(idx, 1);
+        saveWechatUsers();
+        res.json({ code: 0, msg: '删除成功' });
+    } catch (err) {
+        res.status(500).json({ code: 1, msg: err.message || String(err) });
+    }
+});
+
+// 切换用户的活跃绑定（将指定 shopName 的绑定移到数组首位）
+app.put('/api/wechat/bindings/:openid/switch', (req, res) => {
+    try {
+        const { openid } = req.params;
+        const { shopName } = req.body;
+        if (!shopName) {
+            return res.json({ code: 1, msg: 'shopName 必填' });
+        }
+        const user = wechatUsers.find(u => u.openid === openid);
+        if (!user) {
+            return res.json({ code: 1, msg: '用户不存在' });
+        }
+        const idx = user.ltBindings.findIndex(b => b.shopName === shopName);
+        if (idx === -1) {
+            return res.json({ code: 1, msg: '绑定不存在' });
+        }
+        const [binding] = user.ltBindings.splice(idx, 1);
+        user.ltBindings.unshift(binding);
+        saveWechatUsers();
+        res.json({ code: 0, msg: '切换成功', data: { activeShop: shopName } });
+    } catch (err) {
+        res.status(500).json({ code: 1, msg: err.message || String(err) });
+    }
 });
 
 // --- LT 平台回调接收接口（由灵通平台回调） ---
@@ -292,14 +453,13 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             try {
                 const dataUrl = await downloadImageAsBase64(input);
                 userMessageContent = [
-                    { type: "text", text: "请提取这张图片里的物流收件人信息。" },
-                    // 模型端如果支持 data URL，会更稳定；同时保留原始 URL 作为回退
+                    { type: "text", text: "请提取这张图片里的发件人与收件人信息，并为每个联系人标注 role=sender 或 receiver" },
                     { type: "image_url", image_url: { url: dataUrl } }
                 ];
             } catch (err) {
                 console.warn('图片下载失败，回退为使用原始 URL：', err.message || err);
                 userMessageContent = [
-                    { type: "text", text: "请提取这张图片里的物流收件人信息。" },
+                    { type: "text", text: "请提取这张图片里的发件人与收件人信息，并为每个联系人标注 role=sender 或 receiver" },
                     { type: "image_url", image_url: { url: input } }
                 ];
             }
@@ -310,11 +470,11 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             messages: [
                 {
                     role: "system",
-                    content: `你是一个物流地址解析助手。请提取收件人信息(姓名,电话,省,市,区,详细地址)。
-                    如果无法识别或不包含地址，返回空数组 []。
-                    必须严格只返回纯 JSON 字符串，不要使用 markdown 格式。
-                    返回格式示例：
-                    [{"name":"张三","phone":"13800000000","province":"浙江省","city":"杭州市","district":"西湖区","detail":"xx路xx号"}]`
+                    content: `你是一个物流地址解析助手。请从文本或图片中提取发件人(sender)和收件人(receiver)信息。
+                    输出严格的 JSON 数组，每个元素包含: role("sender"或"receiver"), name, phone, province, city, district, detail。
+                    角色判定: 出现“发件/寄件/寄出/发货/寄方”等关键词视为 sender；出现“收件/收货/收方/收货地址”等视为 receiver；如果只有一个联系人且无明确关键词，默认 role="receiver"。
+                    如果无法识别任何地址，返回 []。
+                    示例：[{"role":"sender","name":"张三","phone":"13800000000","province":"浙江省","city":"杭州市","district":"西湖区","detail":"xx路xx号"},{"role":"receiver","name":"李四","phone":"13900000000","province":"上海市","city":"上海市","district":"浦东新区","detail":"张江路88号"}]`
                 },
                 {
                     role: "user",
@@ -377,171 +537,347 @@ export async function processContent(input, type = 'text', wechatUser = null) {
         }
 
         const dataParsed = await tryParseAndFix(content);
-        let data = dataParsed;
-        if (!Array.isArray(data)) data = [data];
+        const contacts = Array.isArray(dataParsed) ? dataParsed : (dataParsed ? [dataParsed] : []);
+        const originalText = typeof input === 'string' ? input : '';
 
-        // 存入数据库
-        let newCount = 0;
-        const addedOrders = [];
-        data.forEach(item => {
-            if (item.name || item.phone || item.detail) {
-                const orderObj = {
-                    id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
-                    ...item,
-                    fullAddress: `${item.province || ''}${item.city || ''}${item.district || ''}${item.detail || ''}`,
-                    source: type === 'image' ? '微信-截图' : '微信-文本',
-                    createTime: new Date().toLocaleString(),
-                    wechatUser: wechatUser ? wechatUser.openid : null  // [新增] 关联微信用户
-                };
-                orders.unshift(orderObj);
-                addedOrders.push(orderObj);
-                newCount++;
-            }
+        const normalizeContact = (c = {}) => ({
+            name: (c.name || '').trim(),
+            phone: (c.phone || c.mobile || '').trim(),
+            province: (c.province || '').trim(),
+            city: (c.city || '').trim(),
+            district: (c.district || c.country || '').trim(),
+            detail: (c.detail || c.detailAddr || '').trim(),
+            role: (c.role || '').toLowerCase()
         });
 
-        if (newCount > 0) {
-            saveOrders(); // [新增] 保存到本地文件
-            console.log(`解析成功，新增 ${newCount} 条。`);
+        const deriveContacts = (arr) => {
+            const senders = [];
+            const receivers = [];
+            const unknowns = [];
+            arr.forEach((item) => {
+                const info = normalizeContact(item || {});
+                if (info.role === 'sender') senders.push(info);
+                else if (info.role === 'receiver') receivers.push(info);
+                else unknowns.push(info);
+            });
 
-            // --- 自动创建 LT 店铺并绑定（如果微信用户尚未绑定任何店铺） ---
-            if (process.env.LT_AUTO_CREATE === 'true' && wechatUser && wechatUser.ltBindings && wechatUser.ltBindings.length === 0) {
-                try {
-                    // 使用第一个解析到的数据作为店铺联系信息的来源
-                    const sample = data[0] || {};
-                    // 生成 shopName —— 可根据需要调整命名策略
-                    const safeName = (wechatUser.nickname || 'wxuser').replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, '_').slice(0, 20);
-                    const shopName = process.env.LT_SHOP_NAME_PREFIX ? `${process.env.LT_SHOP_NAME_PREFIX}_${safeName}_${Date.now()%10000}` : `wx_${safeName}_${Date.now()%10000}`;
-                    // 判断原始输入中是否明确为发件人信息（如包含“发件人/寄件人/发货地址”等关键词）
-                    const originalText = (typeof input === 'string') ? input : '';
-                    const isSenderInfo = /发件人|寄件人|寄件地址|发货地址|寄出地址/.test(originalText);
-
-                    const userPayload = {
-                        shopName,
-                        // 如果用户明确提供的是发件人信息，则使用解析出的字段作为发件人；否则使用默认发件人配置或回退值
-                        contactName: isSenderInfo ? (sample.name || wechatUser.nickname || process.env.LT_DEFAULT_SENDER_NAME || '微信用户') : (process.env.LT_DEFAULT_SENDER_NAME || sample.name || wechatUser.nickname || '微信用户'),
-                        province: isSenderInfo ? (sample.province || process.env.LT_DEFAULT_PROVINCE || '浙江省') : (process.env.LT_DEFAULT_PROVINCE || '浙江省'),
-                        city: isSenderInfo ? (sample.city || process.env.LT_DEFAULT_CITY || '杭州市') : (process.env.LT_DEFAULT_CITY || '杭州市'),
-                        country: isSenderInfo ? (sample.district || process.env.LT_DEFAULT_DISTRICT || '区') : (process.env.LT_DEFAULT_DISTRICT || '区'),
-                        detailAddr: isSenderInfo ? (sample.detail || process.env.LT_DEFAULT_DETAIL || '由微信解析创建') : (process.env.LT_DEFAULT_DETAIL || '由系统默认地址'),
-                        mobile: isSenderInfo ? (sample.phone || process.env.LT_DEFAULT_MOBILE || '') : (process.env.LT_DEFAULT_MOBILE || '')
-                    };
-
-                    if (!isSenderInfo) {
-                        console.log('未检测到发件人信息，使用默认发件人地址配置创建店铺');
-                    }
-
-                    if (!userPayload.mobile) {
-                        console.warn('未提供手机号，跳过自动创建 LT 店铺（LT 要求 mobile）');
-                    } else {
-                        console.log('尝试为微信用户自动创建 LT 店铺：', shopName);
-                        console.log('创建店铺参数：', JSON.stringify(userPayload, null, 2));
-                        const cResp = await createUser(userPayload);
-                        console.log('创建店铺响应：', JSON.stringify(cResp, null, 2));
-                        if (cResp && cResp.code === 0 && cResp.data && cResp.data.userKey) {
-                            const userKey = cResp.data.userKey;
-                            const respShopName = cResp.data.shopName || shopName;
-                            const loginName = cResp.data.loginName;
-                            bindLtAccount(wechatUser.openid, respShopName, userKey, loginName || respShopName);
-                            console.log(`为用户 ${wechatUser.openid} 创建并绑定店铺 ${loginName || respShopName}`);
-
-                            // 记录已创建的店铺到 lt_created_users.json（gitignored）
-                            try {
-                                const createdPath = path.join(__dirname, 'lt_created_users.json');
-                                let createdArr = [];
-                                if (fs.existsSync(createdPath)) {
-                                    try { createdArr = JSON.parse(fs.readFileSync(createdPath, 'utf8') || '[]'); } catch (_) { createdArr = []; }
-                                }
-                                createdArr.push({ shopName: respShopName, loginName: loginName || respShopName, userKey, openid: wechatUser.openid, createdAt: new Date().toISOString() });
-                                fs.writeFileSync(createdPath, JSON.stringify(createdArr, null, 2), 'utf8');
-                            } catch (e) {
-                                console.warn('写入 lt_created_users.json 失败:', e.message || e);
-                            }
-
-                            // 获取登录 URL（服务器端接口）并通过客服消息发回给用户
-                            try {
-                                const loginResp = await getLoginUrl(respShopName, userKey);
-                                let loginUrl = null;
-                                if (loginResp && loginResp.code === 0 && loginResp.data) {
-                                    // 返回 data 可能是字符串或对象
-                                    loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
-                                }
-                                // fallback to constructed URL if server API not available
-                                if (!loginUrl) {
-                                    const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
-                                    const params = new URLSearchParams({ shopName: respShopName });
-                                    loginUrl = `${base}?${params.toString()}`;
-                                }
-
-                                // 发送客服文本消息给用户（需要 WECHAT_APPID/SECRET 已配置）
-                                try {
-                                    const token = await getWechatAccessToken();
-                                    const sendUrl = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`;
-                                    const payload = {
-                                        touser: wechatUser.openid,
-                                        msgtype: 'text',
-                                        text: { content: `已为您创建灵通打单账号：${respShopName}\n登录链接：${loginUrl}` }
-                                    };
-                                    await wxRequest('POST', sendUrl, payload);
-                                    console.log('已通过客服消息把登录链接发给用户');
-                                } catch (err) {
-                                    console.warn('发送客服消息失败：', err.message || err);
-                                }
-                            } catch (err) {
-                                console.warn('获取 LT 登录 URL 失败：', err.message || err);
-                            }
-                        } else {
-                            console.warn('自动创建店铺返回错误：', cResp);
-                        }
-                    }
-                } catch (err) {
-                    console.error('自动创建并绑定 LT 店铺异常：', err);
-                }
+            // 简单兜底：如果未识别角色且有两个联系人，默认第一个 sender 第二个 receiver
+            if (senders.length === 0 && receivers.length === 0 && unknowns.length >= 2) {
+                senders.push(unknowns[0]);
+                receivers.push(unknowns[1]);
+            } else if (senders.length === 0 && receivers.length === 0 && unknowns.length === 1) {
+                receivers.push(unknowns[0]);
             }
 
-            // 尝试把新增订单提交给打印平台适配器（如果配置了）
-            for (const newOrder of addedOrders) {
-                try {
-                    // [新增] 如果微信用户有绑定的 LT 账户，优先使用第一个绑定账户
-                    let printOpts = {};
-                    if (wechatUser && wechatUser.ltBindings && wechatUser.ltBindings.length > 0) {
-                        const binding = wechatUser.ltBindings[0];
-                        printOpts = {
-                            shopName: binding.shopName,
-                            userKey: binding.userKey,
-                            loginName: binding.loginName
-                        };
-                        console.log(`使用微信用户 ${wechatUser.openid} 绑定的账户 ${binding.loginName || binding.shopName} 提交订单`);
-                    } else {
-                        console.warn(`订单 ${newOrder.id} 跳过打单：用户 ${wechatUser ? wechatUser.openid : '未知'} 尚未绑定店铺`);
-                        newOrder.printed = false;
-                        newOrder.printError = '用户未绑定打单店铺';
-                        continue; // 跳过此订单的打单流程
-                    }
-
-                    const printResult = await sendToPrinter(newOrder, printOpts);
-                    if (printResult && printResult.success) {
-                        newOrder.printed = true;
-                        newOrder.printResponse = printResult.response || null;
-                        console.log(`订单 ${newOrder.id} 已提交打印平台，返回:`, printResult.response);
-                    } else if (printResult && printResult.skipped) {
-                        console.log(`订单 ${newOrder.id} 打单适配器跳过（未配置）`);
-                    } else {
-                        newOrder.printed = false;
-                        newOrder.printError = printResult && (printResult.error || printResult.response) || 'unknown';
-                        console.warn(`订单 ${newOrder.id} 打单失败:`, newOrder.printError);
-                    }
-                } catch (err) {
-                    newOrder.printed = false;
-                    newOrder.printError = err.message || String(err);
-                    console.error(`提交订单 ${newOrder.id} 到打印平台发生异常:`, err);
-                }
+            // 关键词辅助：如果仍缺 sender，且文本含发件关键词，则将第一个 unknown 视为 sender
+            const senderKeywords = /发件|寄件|寄出|发货/;
+            const receiverKeywords = /收件|收货|收货地址/;
+            if (senders.length === 0 && unknowns.length > 0 && senderKeywords.test(originalText)) {
+                senders.push(unknowns.shift());
+            }
+            if (receivers.length === 0 && unknowns.length > 0 && receiverKeywords.test(originalText)) {
+                receivers.push(unknowns.shift());
             }
 
-            // 保存 print 状态回 orders.json
-            saveOrders();
-        } else {
-            console.log("AI 未识别到有效地址信息。");
+            return {
+                sender: senders[0] || null,
+                receiver: receivers[0] || null
+            };
+        };
+
+        const { sender, receiver } = deriveContacts(contacts);
+        const hasBinding = wechatUser && wechatUser.ltBindings && wechatUser.ltBindings.length > 0;
+        const binding = hasBinding ? wechatUser.ltBindings[0] : null;
+
+        const notify = async (msg) => {
+            if (wechatUser && wechatUser.openid) {
+                try { await sendWechatCustomMessage(wechatUser.openid, msg); } catch (e) { console.warn('客服消息发送失败:', e.message || e); }
+            } else {
+                console.log('提示消息:', msg);
+            }
+        };
+
+        if (!sender && !receiver) {
+            await notify('❌ 未识别到有效地址，请同时提供发件人和收件人信息。');
+            return;
         }
+
+        // 首次使用（未绑定）
+        if (!hasBinding) {
+            if (!sender || !receiver) {
+                await notify('❌ 首次使用请同时提供完整的发件人和收件人信息。');
+                return;
+            }
+
+            const mobile = sender.phone;
+            if (!mobile) {
+                await notify('❌ 发件人手机号缺失，无法创建打单账号，请补充发件人手机号。');
+                return;
+            }
+
+            const safeName = (wechatUser?.nickname || 'wxuser').replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, '_').slice(0, 20);
+            const shopName = process.env.LT_SHOP_NAME_PREFIX ? `${process.env.LT_SHOP_NAME_PREFIX}_${safeName}_${Date.now()%10000}` : `wx_${safeName}_${Date.now()%10000}`;
+
+            const userPayload = {
+                shopName,
+                contactName: sender.name || wechatUser?.nickname || '微信用户',
+                province: sender.province || process.env.LT_DEFAULT_PROVINCE || '浙江省',
+                city: sender.city || process.env.LT_DEFAULT_CITY || '杭州市',
+                country: sender.district || process.env.LT_DEFAULT_DISTRICT || '区',
+                detailAddr: sender.detail || process.env.LT_DEFAULT_DETAIL || '由微信解析创建',
+                mobile,
+                phone: sender.phone
+            };
+
+            try {
+                const cResp = await createUser(userPayload);
+                if (cResp && cResp.code === 0 && cResp.data && cResp.data.userKey) {
+                    const userKey = cResp.data.userKey;
+                    const respShopName = cResp.data.shopName || shopName;
+                    const loginName = cResp.data.loginName;
+                    const password = cResp.data.password || '';
+                    bindLtAccount(wechatUser.openid, respShopName, userKey, loginName || respShopName, sender);
+
+                    // 记录已创建的店铺
+                    try {
+                        const createdPath = path.join(__dirname, 'lt_created_users.json');
+                        let createdArr = [];
+                        if (fs.existsSync(createdPath)) {
+                            try { createdArr = JSON.parse(fs.readFileSync(createdPath, 'utf8') || '[]'); } catch (_) { createdArr = []; }
+                        }
+                        createdArr.push({ shopName: respShopName, loginName: loginName || respShopName, password, userKey, openid: wechatUser.openid, createdAt: new Date().toISOString(), lastSender: sender });
+                        fs.writeFileSync(createdPath, JSON.stringify(createdArr, null, 2), 'utf8');
+                    } catch (e) {
+                        console.warn('写入 lt_created_users.json 失败:', e.message || e);
+                    }
+
+                    // 创建首单（使用收件人信息）
+                    const orderObj = {
+                        id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+                        sender,
+                        receiver,
+                        name: receiver.name,
+                        phone: receiver.phone,
+                        province: receiver.province,
+                        city: receiver.city,
+                        district: receiver.district,
+                        detail: receiver.detail,
+                        fullAddress: `${receiver.province || ''}${receiver.city || ''}${receiver.district || ''}${receiver.detail || ''}`,
+                        source: type === 'image' ? '微信-截图' : '微信-文本',
+                        createTime: new Date().toLocaleString(),
+                        wechatUser: wechatUser ? wechatUser.openid : null
+                    };
+                    orders.unshift(orderObj);
+
+                    const printResult = await sendToPrinter(orderObj, { shopName: respShopName, userKey });
+                    if (printResult && printResult.success) {
+                        orderObj.printed = true;
+                        orderObj.printResponse = printResult.response || null;
+                    } else {
+                        orderObj.printed = false;
+                        orderObj.printError = (printResult && (printResult.error || printResult.response)) || 'unknown';
+                    }
+                    saveOrders();
+
+                    // 登录链接
+                    let loginUrl = null;
+                    try {
+                        const loginResp = await getLoginUrl(respShopName, userKey);
+                        if (loginResp && loginResp.code === 0 && loginResp.data) {
+                            loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                        }
+                    } catch (e) { console.warn('获取登录链接失败', e.message || e); }
+                    if (!loginUrl) {
+                        const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                        const params = new URLSearchParams({ shopName: respShopName });
+                        loginUrl = `${base}?${params.toString()}`;
+                    }
+
+                    await notify(`✅ 已为您创建打单账号并生成首单\n店铺：${loginName || respShopName}\n发件人：${sender.name || ''} ${sender.phone || ''}\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>\n(链接有效期较短，请尽快点击)`);
+                } else {
+                    await notify(`❌ 创建打单账号失败：${cResp?.msg || '未知错误'}`);
+                }
+            } catch (err) {
+                console.error('创建店铺异常:', err);
+                await notify('❌ 创建打单账号异常，请稍后再试');
+            }
+            return;
+        }
+
+        // 已绑定用户
+        const shopName = binding.shopName;
+        const userKey = binding.userKey;
+
+        const updateSenderOnLt = async (info) => {
+            const payload = {
+                shopName,
+                contactName: info.name,
+                province: info.province,
+                city: info.city,
+                country: info.district,
+                detailAddr: info.detail,
+                mobile: info.phone,
+                phone: info.phone
+            };
+            return updateUser(payload);
+        };
+
+        const ensureSender = async () => {
+            if (sender) return sender;
+            if (binding.lastSender) return binding.lastSender;
+            try {
+                const info = await getUserInfo(shopName);
+                if (info && info.code === 0 && info.data) {
+                    const data = info.data;
+                    const s = normalizeContact({
+                        role: 'sender',
+                        name: data.contactName,
+                        phone: data.mobile || data.phone,
+                        province: data.province,
+                        city: data.city,
+                        district: data.country,
+                        detail: data.detailAddr
+                    });
+                    return s;
+                }
+            } catch (e) {
+                console.warn('获取用户信息失败:', e.message || e);
+            }
+            return null;
+        };
+
+        // 情况：仅发件人 -> 更新发件人信息
+        if (sender && !receiver) {
+            try {
+                const uResp = await updateSenderOnLt(sender);
+                if (uResp && uResp.code === 0) {
+                    binding.lastSender = sender;
+                    saveWechatUsers();
+                    await notify(`✅ 发件人信息已更新\n店铺：${binding.loginName || shopName}\n姓名：${sender.name || ''}\n电话：${sender.phone || ''}`);
+                } else {
+                    await notify(`❌ 发件人更新失败：${uResp?.msg || '未知错误'}`);
+                }
+            } catch (err) {
+                console.error('更新发件人异常:', err);
+                await notify('❌ 发件人更新异常，请稍后再试');
+            }
+            return;
+        }
+
+        // 情况：仅收件人 -> 用已有发件人创建订单
+        if (!sender && receiver) {
+            const senderForOrder = await ensureSender();
+            if (!senderForOrder) {
+                await notify('❌ 未找到发件人信息，请先发送发件人地址。');
+                return;
+            }
+
+            const orderObj = {
+                id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+                sender: senderForOrder,
+                receiver,
+                name: receiver.name,
+                phone: receiver.phone,
+                province: receiver.province,
+                city: receiver.city,
+                district: receiver.district,
+                detail: receiver.detail,
+                fullAddress: `${receiver.province || ''}${receiver.city || ''}${receiver.district || ''}${receiver.detail || ''}`,
+                source: type === 'image' ? '微信-截图' : '微信-文本',
+                createTime: new Date().toLocaleString(),
+                wechatUser: wechatUser ? wechatUser.openid : null
+            };
+            orders.unshift(orderObj);
+
+            const printResult = await sendToPrinter(orderObj, { shopName, userKey, loginName: binding.loginName });
+            if (printResult && printResult.success) {
+                orderObj.printed = true;
+                orderObj.printResponse = printResult.response || null;
+                let loginUrl = null;
+                try {
+                    const loginResp = await getLoginUrl(shopName, userKey);
+                    if (loginResp && loginResp.code === 0 && loginResp.data) {
+                        loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                    }
+                } catch (e) { /* ignore */ }
+                if (!loginUrl) {
+                    const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                    const params = new URLSearchParams({ shopName });
+                    loginUrl = `${base}?${params.toString()}`;
+                }
+                await notify(`✅ 已创建订单（使用上次发件人信息）\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>`);
+            } else {
+                orderObj.printed = false;
+                orderObj.printError = (printResult && (printResult.error || printResult.response)) || 'unknown';
+                await notify(`❌ 订单创建失败：${orderObj.printError}`);
+            }
+            saveOrders();
+            return;
+        }
+
+        // 情况：发件人与收件人均有 -> 更新发件人后建单
+        if (sender && receiver) {
+            let updated = false;
+            try {
+                const uResp = await updateSenderOnLt(sender);
+                if (uResp && uResp.code === 0) {
+                    binding.lastSender = sender;
+                    saveWechatUsers();
+                    updated = true;
+                } else {
+                    await notify(`❌ 发件人更新失败：${uResp?.msg || '未知错误'}`);
+                    return;
+                }
+            } catch (err) {
+                console.error('更新发件人异常:', err);
+                await notify('❌ 发件人更新异常，请稍后再试');
+                return;
+            }
+
+            const orderObj = {
+                id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+                sender,
+                receiver,
+                name: receiver.name,
+                phone: receiver.phone,
+                province: receiver.province,
+                city: receiver.city,
+                district: receiver.district,
+                detail: receiver.detail,
+                fullAddress: `${receiver.province || ''}${receiver.city || ''}${receiver.district || ''}${receiver.detail || ''}`,
+                source: type === 'image' ? '微信-截图' : '微信-文本',
+                createTime: new Date().toLocaleString(),
+                wechatUser: wechatUser ? wechatUser.openid : null
+            };
+            orders.unshift(orderObj);
+
+            const printResult = await sendToPrinter(orderObj, { shopName, userKey, loginName: binding.loginName });
+            if (printResult && printResult.success) {
+                orderObj.printed = true;
+                orderObj.printResponse = printResult.response || null;
+                let loginUrl = null;
+                try {
+                    const loginResp = await getLoginUrl(shopName, userKey);
+                    if (loginResp && loginResp.code === 0 && loginResp.data) {
+                        loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                    }
+                } catch (e) { /* ignore */ }
+                if (!loginUrl) {
+                    const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                    const params = new URLSearchParams({ shopName });
+                    loginUrl = `${base}?${params.toString()}`;
+                }
+                await notify(`✅ 发件人已更新并创建新订单\n发件人：${sender.name || ''} ${sender.phone || ''}\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>`);
+            } else {
+                orderObj.printed = false;
+                orderObj.printError = (printResult && (printResult.error || printResult.response)) || 'unknown';
+                await notify(`❌ 订单创建失败：${orderObj.printError}`);
+            }
+            saveOrders();
+            return;
+        }
+
+        await notify('❌ 未能处理该消息，请检查格式。');
 
     } catch (err) {
         console.error('AI 解析失败:', err);

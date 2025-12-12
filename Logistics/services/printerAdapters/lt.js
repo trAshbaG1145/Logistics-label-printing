@@ -78,6 +78,18 @@ export async function getUserInfo(shopName) {
     return res.body || res;
 }
 
+export async function updateUser(payload) {
+    // payload 需包含 shopName，其余字段按官方文档可选：password, contactName, province, city, country, detailAddr, phone, mobile
+    const { appId, appKey, base } = getAppConfig();
+    if (!payload || !payload.shopName) throw new Error('shopName is required for updateUser');
+    const timestamp = String(Date.now());
+    const dataStr = JSON.stringify(payload);
+    const appSign = signApp(appId, appKey, timestamp, dataStr);
+    const endpoint = `${base}/users/update`;
+    const res = await postForm(endpoint, { appId, timestamp, appSign, data: dataStr });
+    return res.body || res;
+}
+
 export async function getLoginUrl(shopName, userKey) {
     // 按官方文档：userSign=md5(shopName + timestamp + userKey)，shopName 必填
     const { appId, appKey, base } = getAppConfig();
