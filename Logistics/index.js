@@ -746,20 +746,22 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             return null;
         };
 
-        // 情况：仅发件人 -> 更新发件人信息
+        // 情况：仅发件人 -> 更新发件人信息（已绑定用户静默更新，不提示）
         if (sender && !receiver) {
             try {
                 const uResp = await updateSenderOnLt(sender);
                 if (uResp && uResp.code === 0) {
                     binding.lastSender = sender;
                     saveWechatUsers();
-                    await notify(`✅ 发件人信息已更新\n店铺：${binding.loginName || shopName}\n姓名：${sender.name || ''}\n电话：${sender.phone || ''}`);
+                    console.log(`发件人信息已更新 - 店铺：${binding.loginName || shopName}, 姓名：${sender.name || ''}, 电话：${sender.phone || ''}`);
+                    // await notify(`✅ 发件人信息已更新\n店铺：${binding.loginName || shopName}\n姓名：${sender.name || ''}\n电话：${sender.phone || ''}`);
                 } else {
-                    await notify(`❌ 发件人更新失败：${uResp?.msg || '未知错误'}`);
+                    console.warn(`发件人更新失败：${uResp?.msg || '未知错误'}`);
+                    // await notify(`❌ 发件人更新失败：${uResp?.msg || '未知错误'}`);
                 }
             } catch (err) {
                 console.error('更新发件人异常:', err);
-                await notify('❌ 发件人更新异常，请稍后再试');
+                // await notify('❌ 发件人更新异常，请稍后再试');
             }
             return;
         }
@@ -793,23 +795,26 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             if (printResult && printResult.success) {
                 orderObj.printed = true;
                 orderObj.printResponse = printResult.response || null;
-                let loginUrl = null;
-                try {
-                    const loginResp = await getLoginUrl(shopName, userKey);
-                    if (loginResp && loginResp.code === 0 && loginResp.data) {
-                        loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
-                    }
-                } catch (e) { /* ignore */ }
-                if (!loginUrl) {
-                    const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
-                    const params = new URLSearchParams({ shopName });
-                    loginUrl = `${base}?${params.toString()}`;
-                }
-                await notify(`✅ 已创建订单（使用上次发件人信息）\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>`);
+                console.log(`订单创建成功 - 收件人：${receiver.name || ''} ${receiver.phone || ''}`);
+                // 已绑定用户静默创建订单，不发送通知
+                // let loginUrl = null;
+                // try {
+                //     const loginResp = await getLoginUrl(shopName, userKey);
+                //     if (loginResp && loginResp.code === 0 && loginResp.data) {
+                //         loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                //     }
+                // } catch (e) { /* ignore */ }
+                // if (!loginUrl) {
+                //     const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                //     const params = new URLSearchParams({ shopName });
+                //     loginUrl = `${base}?${params.toString()}`;
+                // }
+                // await notify(`✅ 已创建订单（使用上次发件人信息）\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>`);
             } else {
                 orderObj.printed = false;
                 orderObj.printError = (printResult && (printResult.error || printResult.response)) || 'unknown';
-                await notify(`❌ 订单创建失败：${orderObj.printError}`);
+                console.warn(`订单创建失败：${orderObj.printError}`);
+                // await notify(`❌ 订单创建失败：${orderObj.printError}`);
             }
             saveOrders();
             return;
@@ -855,23 +860,26 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             if (printResult && printResult.success) {
                 orderObj.printed = true;
                 orderObj.printResponse = printResult.response || null;
-                let loginUrl = null;
-                try {
-                    const loginResp = await getLoginUrl(shopName, userKey);
-                    if (loginResp && loginResp.code === 0 && loginResp.data) {
-                        loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
-                    }
-                } catch (e) { /* ignore */ }
-                if (!loginUrl) {
-                    const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
-                    const params = new URLSearchParams({ shopName });
-                    loginUrl = `${base}?${params.toString()}`;
-                }
-                await notify(`✅ 发件人已更新并创建新订单\n发件人：${sender.name || ''} ${sender.phone || ''}\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>`);
+                console.log(`发件人已更新并创建订单 - 发件人：${sender.name || ''} ${sender.phone || ''}, 收件人：${receiver.name || ''} ${receiver.phone || ''}`);
+                // 已绑定用户静默操作，不发送通知
+                // let loginUrl = null;
+                // try {
+                //     const loginResp = await getLoginUrl(shopName, userKey);
+                //     if (loginResp && loginResp.code === 0 && loginResp.data) {
+                //         loginUrl = typeof loginResp.data === 'string' ? loginResp.data : (loginResp.data.url || loginResp.data);
+                //     }
+                // } catch (e) { /* ignore */ }
+                // if (!loginUrl) {
+                //     const base = process.env.LT_LOGIN_BASE_URL || 'https://lt.800best.com/smart/h5/index.html';
+                //     const params = new URLSearchParams({ shopName });
+                //     loginUrl = `${base}?${params.toString()}`;
+                // }
+                // await notify(`✅ 发件人已更新并创建新订单\n发件人：${sender.name || ''} ${sender.phone || ''}\n收件人：${receiver.name || ''} ${receiver.phone || ''}\n👉 <a href="${loginUrl}">点击此处进入打单平台</a>`);
             } else {
                 orderObj.printed = false;
                 orderObj.printError = (printResult && (printResult.error || printResult.response)) || 'unknown';
-                await notify(`❌ 订单创建失败：${orderObj.printError}`);
+                console.warn(`订单创建失败：${orderObj.printError}`);
+                // await notify(`❌ 订单创建失败：${orderObj.printError}`);
             }
             saveOrders();
             return;
