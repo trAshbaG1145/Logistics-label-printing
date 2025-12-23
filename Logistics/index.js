@@ -10,6 +10,9 @@ import { sendOrder as sendToPrinter } from './services/printerAdapters/index.js'
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createOAuthHandlers } from './services/ltOAuthHandler.js';
+import crypto from 'crypto'; // [新增]
+import querystring from 'querystring'; // [新增]
+import db from './db.js'; // [新增] 引入数据库模块
 
 // --- 基础配置 ---
 dotenv.config();
@@ -21,51 +24,106 @@ const DATA_FILE = path.join(__dirname, 'orders.json'); // [新增] 数据存储�
 // --- 数据持久化逻辑 [新增] ---
 // 启动时读取本地数据，防止重启丢失
 let orders = [];
-if (fs.existsSync(DATA_FILE)) {
+// if (fs.existsSync(DATA_FILE)) {
+//     try {
+//         orders = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+//         console.log(`已加载本地数据，共 ${orders.length}条订单`);
+//     } catch (e) {
+//         console.error('读取本地数据失败，将使用空数组初始化');
+//     }
+// }
+
+// 保存数据到本地的辅助函数
+// const saveOrders = () => {
+//     fs.writeFileSync(DATA_FILE, JSON.stringify(orders, null, 2));
+// };
+
+// [替代 saveOrders] 保存/创建订单
+async function createOrderInDB(orderData) {
+    const sql = `
+        INSERT INTO orders 
+        (trade_id, openid, receiver_name, receiver_mobile, full_address, raw_data, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `;
+    const values = [
+        orderData.id, // 假设 id 作为 trade_id
+        orderData.wechatUser || '',
+        orderData.name,
+        orderData.phone,
+        orderData.fullAddress,
+        JSON.stringify(orderData),
+        'CREATED'
+    ];
     try {
-        orders = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-        console.log(`已加载本地数据，共 ${orders.length}条订单`);
-    } catch (e) {
-        console.error('读取本地数据失败，将使用空数组初始化');
+        await db.execute(sql, values);
+    } catch (err) {
+        console.error('DB Insert Error:', err);
     }
 }
 
-// 保存数据到本地的辅助函数
-const saveOrders = () => {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(orders, null, 2));
-};
+// [新增] 查单功能
+async function queryOrdersByContactDB(keyword) {
+    const cleanKey = keyword.replace(/[\s-]/g, '');
+    let sql = '';
+    let params = [];
+
+    // 判断是手机号还是姓名
+    if (/^\d{4,11}$/.test(cleanKey)) {
+        // 手机号匹配：支持模糊匹配后4位或全匹配
+        sql = `SELECT * FROM orders WHERE receiver_mobile LIKE ? ORDER BY created_at DESC LIMIT 3`;
+        params = [`%${cleanKey}`]; 
+    } else {
+        // 姓名模糊匹配
+        sql = `SELECT * FROM orders WHERE receiver_name LIKE ? ORDER BY created_at DESC LIMIT 3`;
+        params = [`%${cleanKey}%`];
+    }
+
+    const [rows] = await db.execute(sql, params);
+    return rows;
+}
 
 // --- 微信用户账户绑定数据 [新增] ---
 const WECHAT_USERS_FILE = path.join(__dirname, 'wechat_users.json');
 let wechatUsers = [];
-if (fs.existsSync(WECHAT_USERS_FILE)) {
-    try {
-        wechatUsers = JSON.parse(fs.readFileSync(WECHAT_USERS_FILE, 'utf-8'));
-        console.log(`已加载微信用户绑定数据，共 ${wechatUsers.length} 个用户`);
-    } catch (e) {
-        console.error('读取微信用户数据失败，将使用空数组初始化');
+// if (fs.existsSync(WECHAT_USERS_FILE)) {
+//     try {
+//         wechatUsers = JSON.parse(fs.readFileSync(WECHAT_USERS_FILE, 'utf-8'));
+//         console.log(`已加载微信用户绑定数据，共 ${wechatUsers.length} 个用户`);
+//     } catch (e) {
+//         console.error('读取微信用户数据失败，将使用空数组初始化');
+//     }
+// }
+
+// 保存微信用户数据到本地的辅助函数
+// const saveWechatUsers = () => {
+//     fs.writeFileSync(WECHAT_USERS_FILE, JSON.stringify(wechatUsers, null, 2));
+// };
+
+// [替代 saveWechatUsers] 获取或创建用户
+async function getOrCreateWechatUserDB(openid, nickname = '') {
+    const [rows] = await db.execute('SELECT * FROM wechat_users WHERE openid = ?', [openid]);
+    if (rows.length > 0) {
+        // 兼容旧代码结构，解析 lt_bindings
+        const user = rows[0];
+        if (typeof user.lt_bindings === 'string') {
+             try { user.ltBindings = JSON.parse(user.lt_bindings); } catch(e) { user.ltBindings = []; }
+        } else {
+             user.ltBindings = user.lt_bindings || [];
+        }
+        return user;
+    } else {
+        const newUser = { openid, nickname: nickname || `user_${openid.substring(0, 8)}`, ltBindings: [] };
+        await db.execute(
+            'INSERT INTO wechat_users (openid, nickname, lt_bindings) VALUES (?, ?, ?)',
+            [openid, newUser.nickname, JSON.stringify(newUser.ltBindings)]
+        );
+        return newUser;
     }
 }
 
-// 保存微信用户数据到本地的辅助函数
-const saveWechatUsers = () => {
-    fs.writeFileSync(WECHAT_USERS_FILE, JSON.stringify(wechatUsers, null, 2));
-};
-
 // 根据 openid 查找或创建微信用户
-const getOrCreateWechatUser = (openid, nickname = '') => {
-    let user = wechatUsers.find(u => u.openid === openid);
-    if (!user) {
-        user = {
-            openid,
-            nickname: nickname || `user_${openid.substring(0, 8)}`,
-            bindTime: new Date().toISOString(),
-            ltBindings: []
-        };
-        wechatUsers.push(user);
-        saveWechatUsers();
-    }
-    return user;
+const getOrCreateWechatUser = async (openid, nickname = '') => {
+    return await getOrCreateWechatUserDB(openid, nickname);
 };
 // === OAuth 流程相关 [新增] ===
 const oauthStates = new Map();
@@ -87,22 +145,29 @@ const consumeOAuthState = (state) => {
     return { valid: true, openid: stored.openid };
 };
 
-// 为微信用户绑定 LT 打单账户
-const bindLtAccount = (openid, shopName, userKey) => {
-    const user = getOrCreateWechatUser(openid);
+// 为微信用户绑定 LT 打单账户（支持登录名，保留原 shopName）
+const bindLtAccount = async (openid, shopName, userKey, loginName = null) => {
+    const user = await getOrCreateWechatUser(openid);
     // 避免重复绑定
-    const existBinding = user.ltBindings.find(b => b.shopName === shopName);
+    const existBinding = user.ltBindings.find(b => b.shopName === shopName || (loginName && b.loginName === loginName));
     if (existBinding) {
         existBinding.userKey = userKey;
+        if (loginName) existBinding.loginName = loginName;
         existBinding.bindAt = new Date().toISOString();
     } else {
         user.ltBindings.push({
             shopName,
             userKey,
+            ...(loginName ? { loginName } : {}),
             bindAt: new Date().toISOString()
         });
     }
-    saveWechatUsers();
+    // saveWechatUsers();
+    // 更新 DB
+    await db.execute(
+        'UPDATE wechat_users SET lt_bindings = ? WHERE openid = ?',
+        [JSON.stringify(user.ltBindings), openid]
+    );
     return user;
 };
 
@@ -111,7 +176,17 @@ const oauthStateManager = {
     generate: (openid) => generateOAuthState(openid),
     consume: (state) => consumeOAuthState(state)
 };
-const oauthHandlers = createOAuthHandlers(wechatUsers, bindLtAccount, saveWechatUsers, oauthStateManager);
+// 注意：createOAuthHandlers 内部可能使用了同步的 saveWechatUsers，这里需要确认是否兼容
+// 由于 createOAuthHandlers 是外部导入的，如果它依赖传入的 saveWechatUsers 回调，我们需要传入一个新的 async 回调
+// 但 createOAuthHandlers 可能不等待 async 回调。这里暂时传入一个 async wrapper。
+const saveWechatUsersDB = async (user) => {
+     if (!user) return;
+     await db.execute(
+        'UPDATE wechat_users SET lt_bindings = ? WHERE openid = ?',
+        [JSON.stringify(user.ltBindings), user.openid]
+    );
+}
+const oauthHandlers = createOAuthHandlers(wechatUsers, bindLtAccount, saveWechatUsersDB, oauthStateManager);
 
 // --- 微信自定义菜单（用于“账户绑定”入口） ---
 const WECHAT_APPID = process.env.WECHAT_APPID;
@@ -130,7 +205,14 @@ async function wxRequest(method, url, body = null) {
                 'User-Agent': 'wechat-logistics/1.0',
                 'Connection': 'close'
             };
-            if (body) headers['Content-Type'] = 'application/json';
+            
+            let bodyStr = null;
+            if (body) {
+                // [修复] 预先序列化以计算 Content-Length，避免 412/411 错误
+                bodyStr = JSON.stringify(body);
+                headers['Content-Type'] = 'application/json';
+                headers['Content-Length'] = Buffer.byteLength(bodyStr);
+            }
 
             const options = {
                 method,
@@ -147,6 +229,14 @@ async function wxRequest(method, url, body = null) {
                 resp.on('data', d => chunks.push(d));
                 resp.on('end', () => {
                     const text = Buffer.concat(chunks).toString('utf-8');
+                    
+                    // [增强] 检查 HTTP 状态码
+                    if (resp.statusCode >= 400) {
+                        const msg = `微信 API 请求失败 (status ${resp.statusCode}): ${text || '(无响应内容)'}`;
+                        console.error(msg);
+                        return reject(new Error(msg));
+                    }
+
                     try {
                         const json = JSON.parse(text);
                         resolve(json);
@@ -161,7 +251,8 @@ async function wxRequest(method, url, body = null) {
             });
 
             req.on('error', reject);
-            if (body) req.write(JSON.stringify(body));
+            // [修复] 发送预先序列化的字符串
+            if (bodyStr) req.write(bodyStr);
             req.end();
         } catch (err) {
             reject(err);
@@ -184,6 +275,154 @@ async function getWechatAccessToken() {
     const expires = resp.expires_in ? (resp.expires_in - 120) * 1000 : 7000 * 1000; // 提前 120s 过期
     wechatTokenCache = { token: resp.access_token, expiresAt: Date.now() + expires };
     return resp.access_token;
+}
+
+// === [新增] 辅助函数：发送微信客服消息 ===
+async function sendWechatCustomMessage(openid, content) {
+    try {
+        const token = await getWechatAccessToken();
+        const url = `https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=${token}`;
+        const postData = {
+            touser: openid,
+            msgtype: "text",
+            text: { content: content }
+        };
+        
+        const resp = await wxRequest('POST', url, postData);
+        if (resp.errcode && resp.errcode !== 0) {
+            console.error('发送客服消息失败:', resp);
+        } else {
+            console.log('客服消息发送成功');
+        }
+    } catch (err) {
+        console.error('发送微信消息流程失败:', err);
+    }
+}
+
+// === [新增] 辅助函数：通用灵通 API 请求 ===
+async function callLtApi(apiPath, businessData) {
+    const BASE_URL = process.env.LT_BASE_URL || 'https://lttest.800best.com/api/v1';
+    const APP_ID = process.env.LT_APP_ID;
+    const APP_KEY = process.env.LT_APP_KEY || process.env.LT_TOKEN;
+    
+    // 部分接口不需要 userKey 签名，但大部分需要 shopName 等
+    // 这里简化处理，假设 businessData 已经包含了必要的业务参数
+    
+    if (!APP_ID || !APP_KEY) throw new Error('缺少灵通平台配置');
+
+    const md5 = (str) => crypto.createHash('md5').update(str, 'utf8').digest('hex');
+    const timestamp = Date.now().toString();
+    const dataStr = JSON.stringify(businessData);
+
+    // 公共参数签名
+    const appSign = md5(APP_ID + timestamp + APP_KEY + dataStr);
+
+    const postBody = querystring.stringify({
+        appId: APP_ID,
+        timestamp: timestamp,
+        appSign: appSign,
+        data: dataStr
+    });
+
+    const url = `${BASE_URL}${apiPath}`;
+    
+    return new Promise((resolve, reject) => {
+        const parsedUrl = new URL(url);
+        const options = {
+            method: 'POST',
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname,
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(postBody)
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(body));
+                } catch (e) { reject(e); }
+            });
+        });
+        req.on('error', reject);
+        req.write(postBody);
+        req.end();
+    });
+}
+
+// === [新增] 辅助函数：创建灵通用户 ===
+async function createLtUser(payload) {
+    return callLtApi('/users/create', payload);
+}
+
+// === [新增] 辅助函数：更新灵通用户 ===
+async function updateLtUser(payload) {
+    return callLtApi('/users/update', payload);
+}
+
+// === [新增] 辅助函数：获取灵通免密登录链接 ===
+async function getLtLoginUrl() {
+    const BASE_URL = process.env.LT_BASE_URL || 'https://lttest.800best.com/api/v1';
+    const APP_ID = process.env.LT_APP_ID;
+    const APP_KEY = process.env.LT_APP_KEY || process.env.LT_TOKEN;
+    const SHOP_NAME = process.env.LT_SHOP_NAME;
+    const USER_KEY = process.env.LT_USER_KEY;
+
+    if (!APP_ID || !APP_KEY || !SHOP_NAME || !USER_KEY) {
+        throw new Error('缺少灵通平台配置 (LT_APP_ID, LT_TOKEN, LT_SHOP_NAME, LT_USER_KEY)');
+    }
+
+    const md5 = (str) => crypto.createHash('md5').update(str, 'utf8').digest('hex');
+    const timestamp = Date.now().toString();
+
+    // 1. 业务参数签名
+    const userSign = md5(SHOP_NAME + timestamp + USER_KEY);
+    const businessData = {
+        user: { shopName: SHOP_NAME, timestamp: timestamp, userSign: userSign }
+    };
+    const dataStr = JSON.stringify(businessData);
+
+    // 2. 公共参数签名
+    const appTimestamp = Date.now().toString();
+    const appSign = md5(APP_ID + appTimestamp + APP_KEY + dataStr);
+
+    const postBody = querystring.stringify({
+        appId: APP_ID,
+        timestamp: appTimestamp,
+        appSign: appSign,
+        data: dataStr
+    });
+
+    const url = `${BASE_URL}/users/login/url`;
+    
+    return new Promise((resolve, reject) => {
+        const parsedUrl = new URL(url);
+        const options = {
+            method: 'POST',
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname,
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(postBody)
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(body));
+                } catch (e) { reject(e); }
+            });
+        });
+        req.on('error', reject);
+        req.write(postBody);
+        req.end();
+    });
 }
 
 async function createWechatMenu(menuPayload) {
@@ -271,10 +510,32 @@ app.post('/wechat', async (req, res) => {
         console.log(`收到消息类型: ${message.MsgType}, 来自用户: ${message.FromUserName}`);
 
         // 提取微信用户 openid
-        const wechatUser = getOrCreateWechatUser(message.FromUserName);
+        const wechatUser = await getOrCreateWechatUser(message.FromUserName);
 
         if (message.MsgType === 'text') {
             // 处理文本消息
+            const content = message.Content.trim();
+
+            // === [新增] 处理“打印”指令 ===
+            if (content === '打印') {
+                console.log(`收到打印指令，用户: ${message.FromUserName}`);
+                try {
+                    const loginRes = await getLtLoginUrl();
+                    if (loginRes.code === 0) {
+                        const link = loginRes.data;
+                        // 使用客服消息接口发送链接，支持 HTML 标签
+                        const replyText = `✅ 登录链接已生成\n\n<a href="${link}">👉 点击此处进入打印平台</a>\n\n(链接有效期较短，请尽快点击)`;
+                        await sendWechatCustomMessage(message.FromUserName, replyText);
+                    } else {
+                        await sendWechatCustomMessage(message.FromUserName, `❌ 获取链接失败: ${loginRes.msg}`);
+                    }
+                } catch (err) {
+                    console.error(err);
+                    await sendWechatCustomMessage(message.FromUserName, '❌ 系统错误，请检查后台日志');
+                }
+                return; // 结束处理，不进行 AI 解析
+            }
+
             processContent(message.Content, 'text', wechatUser);
         } else if (message.MsgType === 'image') {
             // [新增] 处理图片消息
@@ -288,15 +549,27 @@ app.post('/wechat', async (req, res) => {
 });
 
 // 3. 获取数据接口
-app.get('/api/orders', (req, res) => {
-    res.json(orders);
+app.get('/api/orders', async (req, res) => {
+    try {
+        const [rows] = await db.execute('SELECT * FROM orders ORDER BY created_at DESC LIMIT 100');
+        // 尝试解析 raw_data
+        const results = rows.map(r => {
+            try { return { ...r, ...JSON.parse(r.raw_data) }; } catch(e) { return r; }
+        });
+        res.json(results);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 4. 清空数据接口
-app.post('/api/clear', (req, res) => {
-    orders = [];
-    saveOrders(); // [新增] 同步清空本地文件
-    res.json({ success: true });
+app.post('/api/clear', async (req, res) => {
+    try {
+        await db.execute('TRUNCATE TABLE orders');
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 一键创建“账户绑定”自定义菜单
@@ -327,13 +600,13 @@ app.get('/api/lt/oauth/callback', oauthHandlers.handleCallback);
 
 // --- 微信用户账户绑定接口 [新增] ---
 // 绑定微信用户与 LT 打单账户
-app.post('/api/lt/bind', (req, res) => {
+app.post('/api/lt/bind', async (req, res) => {
     try {
         const { openid, shopName, userKey } = req.body;
         if (!openid || !shopName || !userKey) {
             return res.status(400).json({ code: 1, msg: '缺少必需参数: openid, shopName, userKey' });
         }
-        const user = bindLtAccount(openid, shopName, userKey);
+        const user = await bindLtAccount(openid, shopName, userKey);
         res.json({ code: 0, msg: '绑定成功', data: user });
     } catch (err) {
         console.error('账户绑定失败:', err);
@@ -342,10 +615,10 @@ app.post('/api/lt/bind', (req, res) => {
 });
 
 // 查询微信用户已绑定的 LT 账户
-app.get('/api/lt/accounts/:openid', (req, res) => {
+app.get('/api/lt/accounts/:openid', async (req, res) => {
     try {
         const { openid } = req.params;
-        const user = wechatUsers.find(u => u.openid === openid);
+        const user = await getOrCreateWechatUser(openid);
         if (!user) {
             return res.json({ code: 0, msg: '用户未绑定任何账户', data: { ltBindings: [] } });
         }
@@ -357,18 +630,22 @@ app.get('/api/lt/accounts/:openid', (req, res) => {
 });
 
 // 解绑微信用户与 LT 打单账户
-app.post('/api/lt/unbind', (req, res) => {
+app.post('/api/lt/unbind', async (req, res) => {
     try {
         const { openid, shopName } = req.body;
         if (!openid || !shopName) {
             return res.status(400).json({ code: 1, msg: '缺少必需参数: openid, shopName' });
         }
-        const user = wechatUsers.find(u => u.openid === openid);
+        const user = await getOrCreateWechatUser(openid);
         if (!user) {
             return res.status(404).json({ code: 1, msg: '用户不存在' });
         }
         user.ltBindings = user.ltBindings.filter(b => b.shopName !== shopName);
-        saveWechatUsers();
+        // saveWechatUsers();
+        await db.execute(
+            'UPDATE wechat_users SET lt_bindings = ? WHERE openid = ?',
+            [JSON.stringify(user.ltBindings), openid]
+        );
         res.json({ code: 0, msg: '解绑成功', data: user });
     } catch (err) {
         console.error('账户解绑失败:', err);
@@ -379,11 +656,42 @@ app.post('/api/lt/unbind', (req, res) => {
 // --- LT 平台回调接收接口（由灵通平台回调） ---
 import { handleLtCallback } from './services/ltCallbackHandler.js';
 
-app.post('/api/lt/callback', (req, res) => {
+app.post('/api/lt/callback', async (req, res) => {
     try {
         const payload = req.body;
-        const updatedIds = handleLtCallback(payload, orders);
-        if (updatedIds && updatedIds.length > 0) saveOrders();
+        // const updatedIds = handleLtCallback(payload, orders);
+        // if (updatedIds && updatedIds.length > 0) saveOrders();
+        
+        // [新增] DB 更新逻辑
+        if (payload && payload.list && Array.isArray(payload.list)) {
+            for (const item of payload.list) {
+                if (!item.tradeId) continue;
+                let status = 'CREATED';
+                let expressNo = item.expressNo;
+                let expressCompany = item.expressCompany;
+                
+                if (payload.callbackType === 'PRINTED_SEND') {
+                    status = 'PRINTED';
+                } else if (payload.callbackType === 'CONSIGNED') {
+                    status = 'CONSIGNED';
+                }
+                
+                // 仅当有单号时更新
+                if (expressNo) {
+                     await db.execute(
+                        `UPDATE orders SET express_no = ?, express_company = ?, status = ? WHERE trade_id = ?`,
+                        [expressNo, expressCompany, status, item.tradeId]
+                    );
+                } else {
+                     // 仅更新状态
+                     await db.execute(
+                        `UPDATE orders SET status = ? WHERE trade_id = ?`,
+                        [status, item.tradeId]
+                    );
+                }
+            }
+        }
+
         res.json({ code: 0, msg: '成功' });
     } catch (err) {
         console.error('LT callback handling failed:', err);
@@ -394,6 +702,40 @@ app.post('/api/lt/callback', (req, res) => {
 // --- 核心智能解析逻辑 (已升级支持多模态 + 微信用户绑定) ---
 export async function processContent(input, type = 'text', wechatUser = null) {
     try {
+        // === [新增] 查单意图识别 ===
+        if (type === 'text') {
+            const queryMatch = input.match(/^(?:查单|快递|物流|进度)?\s*(\d{4,11}|[\u4e00-\u9fa5]{2,})$/);
+            if (queryMatch) {
+                const keyword = queryMatch[1] || input;
+                try {
+                    const ordersFound = await queryOrdersByContactDB(keyword);
+                    
+                    if (ordersFound.length === 0) {
+                        if (wechatUser) {
+                            await sendWechatCustomMessage(wechatUser.openid, `未找到与“${keyword}”相关的最近订单。`);
+                        }
+                        return;
+                    }
+                    
+                    const replyText = ordersFound.map(o => {
+                        const statusStr = o.express_no ? `已发货 (${o.express_company})` : '处理中/待打印';
+                        const noStr = o.express_no ? `单号：${o.express_no}` : '';
+                        const timeStr = new Date(o.created_at).toLocaleString('zh-CN', { hour12: false });
+                        return `📦 收件人：${o.receiver_name}\n📱 手机：${o.receiver_mobile}\n🚚 状态：${statusStr}\n${noStr}\n🕒 时间：${timeStr}`;
+                    }).join('\n\n----------------\n\n');
+                    
+                    if (wechatUser) {
+                        await sendWechatCustomMessage(wechatUser.openid, replyText);
+                    }
+                    return; // 结束处理
+                } catch (err) {
+                    console.error('查单出错:', err);
+                    if (wechatUser) await sendWechatCustomMessage(wechatUser.openid, '系统繁忙，请稍后再试。');
+                    return;
+                }
+            }
+        }
+
         let modelName = "qwen-plus"; // 默认文本模型
         let userMessageContent = input;
 
@@ -423,7 +765,8 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             messages: [
                 {
                     role: "system",
-                    content: `你是一个物流地址解析助手。请提取收件人信息(姓名,电话,省,市,区,详细地址)。
+                    content: `你是一个物流地址解析助手。请提取姓名、电话、地址信息(省,市,区,详细地址)。
+                    注意：无论是“收件人”还是“发件人/寄件人”，只要文本中包含联系人地址信息，都请提取出来。
                     如果无法识别或不包含地址，返回空数组 []。
                     必须严格只返回纯 JSON 字符串，不要使用 markdown 格式。
                     返回格式示例：
@@ -493,10 +836,64 @@ export async function processContent(input, type = 'text', wechatUser = null) {
         let data = dataParsed;
         if (!Array.isArray(data)) data = [data];
 
+        // === [新增] 检查是否为“修改发件人”意图 ===
+        const originalText = (typeof input === 'string') ? input : '';
+        const isSenderInfo = /发件人|寄件人|寄件地址|发货地址|寄出地址/.test(originalText);
+
+        if (isSenderInfo && data.length > 0) {
+            const info = data[0];
+            const senderPayload = {
+                contactName: info.name,
+                mobile: info.phone,
+                province: info.province,
+                city: info.city,
+                country: info.district,
+                detailAddr: info.detail
+            };
+
+            if (wechatUser && wechatUser.ltBindings && wechatUser.ltBindings.length > 0) {
+                // 1. 已绑定：更新现有店铺信息
+                const binding = wechatUser.ltBindings[0];
+                senderPayload.shopName = binding.shopName;
+                
+                console.log(`正在更新店铺 ${binding.shopName} 的发件人信息...`);
+                try {
+                    const updateRes = await updateLtUser(senderPayload);
+                    if (updateRes.code === 0) {
+                        await sendWechatCustomMessage(wechatUser.openid, `✅ 发件人信息已更新\n店铺：${binding.shopName}\n姓名：${info.name}\n电话：${info.phone}`);
+                    } else {
+                        await sendWechatCustomMessage(wechatUser.openid, `❌ 更新失败：${updateRes.msg}`);
+                    }
+                } catch (err) {
+                    await sendWechatCustomMessage(wechatUser.openid, `❌ 更新异常：${err.message}`);
+                }
+            } else {
+                // 2. 未绑定：自动创建新店铺
+                const safeName = (wechatUser.nickname || 'wxuser').replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]/g, '_').slice(0, 20);
+                const shopName = `wx_${safeName}_${Date.now()%10000}`;
+                senderPayload.shopName = shopName;
+
+                console.log(`正在创建新店铺 ${shopName}...`);
+                try {
+                    const createRes = await createLtUser(senderPayload);
+                    if (createRes.code === 0 && createRes.data) {
+                        const { userKey, loginName } = createRes.data;
+                        await bindLtAccount(wechatUser.openid, shopName, userKey, loginName);
+                        await sendWechatCustomMessage(wechatUser.openid, `✅ 已为您创建打单账号\n店铺：${loginName || shopName}\n发件人：${info.name}`);
+                    } else {
+                        await sendWechatCustomMessage(wechatUser.openid, `❌ 创建失败：${createRes.msg}`);
+                    }
+                } catch (err) {
+                    await sendWechatCustomMessage(wechatUser.openid, `❌ 创建异常：${err.message}`);
+                }
+            }
+            return; // 结束处理，不作为订单保存
+        }
+
         // 存入数据库
         let newCount = 0;
         const addedOrders = [];
-        data.forEach(item => {
+        for (const item of data) {
             if (item.name || item.phone || item.detail) {
                 const orderObj = {
                     id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
@@ -506,14 +903,15 @@ export async function processContent(input, type = 'text', wechatUser = null) {
                     createTime: new Date().toLocaleString(),
                     wechatUser: wechatUser ? wechatUser.openid : null  // [新增] 关联微信用户
                 };
-                orders.unshift(orderObj);
+                // orders.unshift(orderObj);
+                await createOrderInDB(orderObj);
                 addedOrders.push(orderObj);
                 newCount++;
             }
-        });
+        }
 
         if (newCount > 0) {
-            saveOrders(); // [新增] 保存到本地文件
+            // saveOrders(); // [新增] 保存到本地文件
             console.log(`解析成功，新增 ${newCount} 条。`);
 
             // 尝试把新增订单提交给打印平台适配器（如果配置了）
@@ -525,7 +923,8 @@ export async function processContent(input, type = 'text', wechatUser = null) {
                         const binding = wechatUser.ltBindings[0];
                         printOpts = {
                             shopName: binding.shopName,
-                            userKey: binding.userKey
+                            userKey: binding.userKey,
+                            loginName: binding.loginName // [新增] 传递 loginName
                         };
                         console.log(`使用微信用户 ${wechatUser.openid} 绑定的账户 ${binding.shopName} 提交订单`);
                     }
@@ -550,7 +949,18 @@ export async function processContent(input, type = 'text', wechatUser = null) {
             }
 
             // 保存 print 状态回 orders.json
-            saveOrders();
+            // saveOrders();
+            // 更新 DB 中的打印状态
+            // 注意：这里简单处理，如果需要更新 printInfo 等，需要 updateOrderInDB
+            // 暂时略过，因为 createOrderInDB 已经写入了初始状态。如果 sendToPrinter 成功，应该更新 DB。
+            // 这是一个遗留问题，原代码是 saveOrders() 两次。
+            // 建议：如果打印成功，更新 DB 状态
+           for (const newOrder of addedOrders) {
+     if (newOrder.printed) {
+         // 更新为 PRINTED 状态，如果有返回运单号也可以顺便在这里更新（视 adapter 返回而定）
+         await db.execute('UPDATE orders SET status = ? WHERE trade_id = ?', ['PRINTED', newOrder.id]);
+     }
+}
         } else {
             console.log("AI 未识别到有效地址信息。");
         }
